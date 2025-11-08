@@ -1,6 +1,8 @@
 import './styles.css';
 import {
   AmbientLight,
+  Box3,
+  Box3Helper,
   BufferGeometry,
   CircleGeometry,
   Color,
@@ -37,6 +39,8 @@ interface VaseParams {
   heightSegments: number;
   sectionEnabled: boolean;
   sectionOffset: number;
+  showBoundingBox: boolean;
+  showWireframe: boolean;
 }
 
 const gui = new GUI({ width: 320 });
@@ -50,7 +54,9 @@ const params: VaseParams = {
   radialSegments: 96,
   heightSegments: 110,
   sectionEnabled: false,
-  sectionOffset: 0
+  sectionOffset: 0,
+  showBoundingBox: false,
+  showWireframe: false
 };
 
 const container = document.querySelector<HTMLDivElement>('#app');
@@ -69,6 +75,12 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.localClippingEnabled = true;
 container.appendChild(renderer.domElement);
+
+const dimensionLabel = document.createElement('div');
+dimensionLabel.id = 'dimension-label';
+dimensionLabel.textContent = '';
+dimensionLabel.style.display = 'none';
+container.appendChild(dimensionLabel);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -93,14 +105,34 @@ const sectionLines = new LineSegments(new BufferGeometry(), sectionLineMaterial)
 sectionLines.visible = false;
 scene.add(sectionLines);
 
+const boundingBox = new Box3();
+const boundingBoxHelper = new Box3Helper(boundingBox, 0xf7ad2b);
+boundingBoxHelper.visible = false;
+scene.add(boundingBoxHelper);
+
 const material = new MeshStandardMaterial({
   color: 0x9ed5ff,
   roughness: 0.35,
   metalness: 0.15,
-  side: DoubleSide
+  side: DoubleSide,
+  wireframe: params.showWireframe
 });
 
+const scratchSize = new Vector3();
+let cachedVolume = 0;
+const metricsState = {
+  volumeMM3: '0',
+  volumeCM3: '0',
+  volumeL: '0',
+  internalVolumeMM3: '0',
+  internalVolumeCM3: '0',
+  internalVolumeL: '0'
+};
+let metricsControllers: Array<ReturnType<GUI['add']>> = [];
+
 const vaseMesh = new Mesh(createVaseGeometry(params), material);
+cachedVolume = computeMeshVolume(vaseMesh.geometry);
+updateVolumeReadout();
 scene.add(vaseMesh);
 
 let needsUpdate = false;
@@ -119,6 +151,7 @@ const updateSectionState = () => {
   sectionPlane.constant = -params.sectionOffset;
   material.clippingPlanes = params.sectionEnabled ? [sectionPlane] : [];
   updateSectionLines();
+  updateBoundingBoxState();
 };
 
 const refreshGeometry = () => {
@@ -141,6 +174,51 @@ function updateSectionLines() {
   sectionLines.geometry.dispose();
   sectionLines.geometry = lineGeometry;
   sectionLines.visible = true;
+}
+
+function updateBoundingBoxState() {
+  if (!params.showBoundingBox) {
+    boundingBoxHelper.visible = false;
+    dimensionLabel.style.display = 'none';
+    return;
+  }
+
+  vaseMesh.geometry.computeBoundingBox();
+  const box = vaseMesh.geometry.boundingBox;
+  if (!box) {
+    boundingBoxHelper.visible = false;
+    dimensionLabel.style.display = 'none';
+    return;
+  }
+
+  boundingBox.copy(box);
+  boundingBoxHelper.visible = true;
+  boundingBoxHelper.updateMatrixWorld(true);
+
+  const size = box.getSize(scratchSize);
+  dimensionLabel.textContent = `W ${size.x.toFixed(1)} mm × D ${size.z.toFixed(1)} mm × H ${size.y.toFixed(1)} mm`;
+  dimensionLabel.style.display = 'block';
+}
+
+function updateWireframeState() {
+  material.wireframe = params.showWireframe;
+  material.needsUpdate = true;
+}
+
+function updateVolumeReadout() {
+  const volumeMM3 = Math.max(cachedVolume, 0);
+  const volumeCM3 = volumeMM3 / 1000;
+  const volumeL = volumeMM3 / 1_000_000;
+  const internalVolumeMM3 = computeInteriorVolume(params);
+  const internalVolumeCM3 = internalVolumeMM3 / 1000;
+  const internalVolumeL = internalVolumeMM3 / 1_000_000;
+  metricsState.volumeMM3 = volumeMM3.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  metricsState.volumeCM3 = volumeCM3.toFixed(1);
+  metricsState.volumeL = volumeL.toFixed(3);
+  metricsState.internalVolumeMM3 = internalVolumeMM3.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  metricsState.internalVolumeCM3 = internalVolumeCM3.toFixed(1);
+  metricsState.internalVolumeL = internalVolumeL.toFixed(3);
+  metricsControllers.forEach((controller) => controller.updateDisplay());
 }
 
 function configureGridMaterial(helper: GridHelper, opacity: number) {
@@ -192,12 +270,25 @@ function createVaseGeometry(current: VaseParams): BufferGeometry {
   return merged;
 }
 
+function computeInteriorVolume(current: VaseParams): number {
+  const outerRadius = current.baseRadius;
+  const innerRadius = Math.max(outerRadius - current.wallThickness, 0);
+  if (innerRadius <= 0) return 0;
+  const bottomThickness = Math.min(Math.max(current.wallThickness * 2, 2), current.height * 0.4);
+  const height = Math.max(current.height, bottomThickness + 1);
+  const innerHeight = Math.max(height - bottomThickness, 0);
+  return Math.PI * innerRadius * innerRadius * innerHeight;
+}
+
 function updateVaseMesh() {
   const nextGeometry = createVaseGeometry(params);
   vaseMesh.geometry.dispose();
   vaseMesh.geometry = nextGeometry;
   controls.target.set(0, params.height * 0.5, 0);
+  cachedVolume = computeMeshVolume(vaseMesh.geometry);
+  updateVolumeReadout();
   updateSectionLines();
+  updateBoundingBoxState();
 }
 
 const shapeFolder = gui.addFolder('Shape');
@@ -228,7 +319,24 @@ const viewActions = {
   zoomExtents: () => zoomToVase()
 };
 viewFolder.add(viewActions, 'zoomExtents').name('Zoom extents');
+viewFolder.add(params, 'showBoundingBox').name('Show bounding box').onChange(updateBoundingBoxState);
+viewFolder.add(params, 'showWireframe').name('Wireframe view').onChange(updateWireframeState);
 viewFolder.open();
+updateWireframeState();
+
+const metricsFolder = gui.addFolder('Metrics');
+metricsControllers = [
+  metricsFolder.add(metricsState, 'volumeMM3').name('Material Vol. (mm³)').listen(),
+  metricsFolder.add(metricsState, 'volumeCM3').name('Material Vol. (cm³)').listen(),
+  metricsFolder.add(metricsState, 'volumeL').name('Material Vol. (L)').listen(),
+  metricsFolder.add(metricsState, 'internalVolumeMM3').name('Internal Vol. (mm³)').listen(),
+  metricsFolder.add(metricsState, 'internalVolumeCM3').name('Internal Vol. (cm³)').listen(),
+  metricsFolder.add(metricsState, 'internalVolumeL').name('Internal Vol. (L)').listen()
+];
+metricsControllers.forEach((controller) => {
+  controller.domElement.querySelector('input')?.setAttribute('readonly', 'true');
+});
+metricsFolder.open();
 
 const exporterFolder = gui.addFolder('Export');
 const exportActions = {
@@ -357,6 +465,32 @@ function computeIntersection(
   if (t >= 0 && t <= 1) {
     bucket.push(p1.clone().lerp(p2, t));
   }
+}
+
+function computeMeshVolume(geometry: BufferGeometry): number {
+  const positionAttr = geometry.getAttribute('position');
+  if (!positionAttr) return 0;
+
+  const indexAttr = geometry.getIndex();
+  const a = new Vector3();
+  const b = new Vector3();
+  const c = new Vector3();
+  let volume = 0;
+
+  const triangleCount = indexAttr ? indexAttr.count / 3 : positionAttr.count / 3;
+  for (let tri = 0; tri < triangleCount; tri += 1) {
+    const ia = indexAttr ? indexAttr.getX(tri * 3) : tri * 3;
+    const ib = indexAttr ? indexAttr.getX(tri * 3 + 1) : tri * 3 + 1;
+    const ic = indexAttr ? indexAttr.getX(tri * 3 + 2) : tri * 3 + 2;
+
+    a.fromBufferAttribute(positionAttr, ia);
+    b.fromBufferAttribute(positionAttr, ib);
+    c.fromBufferAttribute(positionAttr, ic);
+
+    volume += a.dot(b.clone().cross(c));
+  }
+
+  return Math.abs(volume / 6);
 }
 
 window.addEventListener('resize', () => {
