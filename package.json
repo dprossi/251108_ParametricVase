@@ -1,0 +1,29 @@
+{
+  "name": "parametric-vase",
+  "version": "0.1.0",
+  "description": "Parametric vase generator with slider controls and export capabilities.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "threejs",
+    "parametric",
+    "vase",
+    "webgl"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "lil-gui": "^0.21.0",
+    "three": "^0.181.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/three": "^0.181.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2"
+  }
+}
